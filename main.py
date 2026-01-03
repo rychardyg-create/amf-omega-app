@@ -1,16 +1,15 @@
 # =========================================================
-# 🧠 AMF-OMEGA PRIME — APP AUTOMÁTICO (STREAMLIT)
+# 🧠 AMF-OMEGA PRIME — APP AUTOMÁTICO (VERSÃO FINAL)
 # =========================================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
 
-# =========================
-# CONFIGURAÇÕES GERAIS
-# =========================
-TOP_N = 20
+# ========================
+# CONFIGURAÇÕES
+# ========================
+TOP_N = 5
 N_MC = 8000
 DECAY_HALFLIFE = 45
 SEED = 42
@@ -23,60 +22,13 @@ W_PENAL = 0.10
 
 np.random.seed(SEED)
 
-# =========================
-# INTERFACE
-# =========================
-st.set_page_config(
-    page_title="AMF-OMEGA PRIME",
-    layout="centered"
-)
-
-st.title("🧠 AMF-OMEGA PRIME")
-st.caption("Sistema automático de análise e geração de milhares")
-
-st.markdown("---")
-
-# =========================
-# UPLOAD DO CSV
-# =========================
-arquivo = st.file_uploader(
-    "📂 Envie o arquivo CSV (histórico do Jogo do Bicho)",
-    type=["csv"]
-)
-
-if not arquivo:
-    st.info("Envie um arquivo CSV para iniciar a análise.")
-    st.stop()
-
-# =========================
-# CARREGAR E NORMALIZAR CSV
-# =========================
-df = pd.read_csv(arquivo)
-df.columns = df.columns.str.lower().str.strip()
-
-# Colunas obrigatórias
-colunas_necessarias = {"milhar", "premio", "data"}
-if not colunas_necessarias.issubset(df.columns):
-    st.error("❌ O CSV precisa conter as colunas: milhar, premio, data")
-    st.stop()
-
-df["milhar"] = df["milhar"].astype(str).str.zfill(4)
-df["centena"] = df["milhar"].str[-3:]
-df["premio"] = df["premio"].astype(str)
-df["data"] = pd.to_datetime(df["data"], errors="coerce")
-
-df = df.dropna(subset=["milhar", "data"])
-
-MILHAR_BLOQUEADA = set(df["milhar"])
-CENTENA_HIST = set(df["centena"])
-
-# =========================
+# ========================
 # FUNÇÕES
-# =========================
+# ========================
 def decay(days, hl):
     return np.exp(-np.log(2) * days / hl)
 
-def gerar_previsao(df, premio):
+def gerar_previsao(df, premio, milhar_bloqueada, centena_hist):
     base = df[df["premio"] == premio].copy()
     if base.empty:
         return pd.DataFrame()
@@ -102,10 +54,10 @@ def gerar_previsao(df, premio):
         for d in range(10):
             mil = f"{d}{cent}"
 
-            if mil in MILHAR_BLOQUEADA:
-                continue  # bloqueio absoluto
+            if mil in milhar_bloqueada:
+                continue  # NÃO repetir milhar do CSV
 
-            penal = 1.0 if cent in CENTENA_HIST else 0.0
+            penal = 1.0 if cent in centena_hist else 0.0
 
             candidatos.append({
                 "milhar": mil,
@@ -141,37 +93,42 @@ def gerar_previsao(df, premio):
             .reset_index(drop=True)
     )
 
-# =========================
-# EXECUÇÃO
-# =========================
-st.markdown("## 🎯 Previsão automática")
+# ========================
+# APP
+# ========================
+st.set_page_config(page_title="AMF-OMEGA PRIME", layout="centered")
+st.title("🧠 AMF-OMEGA PRIME")
+st.subheader("Sistema automático de análise e geração de milhares")
 
-resultados = []
+arquivo = st.file_uploader("📂 Envie o CSV do Jogo do Bicho", type=["csv"])
 
-for p in ["1º", "2º", "3º", "4º", "5º"]:
-    r = gerar_previsao(df, p)
-    resultados.append(r)
+if arquivo:
+    df = pd.read_csv(arquivo)
+    df.columns = df.columns.str.lower().str.strip()
 
-resultado_final = pd.concat(resultados, ignore_index=True)
+    df["milhar"] = df["milhar"].astype(str).str.zfill(4)
+    df["centena"] = df["milhar"].str[-3:]
+    df["premio"] = df["premio"].astype(str)
+    df["data"] = pd.to_datetime(df["data"], errors="coerce")
 
-if resultado_final.empty:
-    st.warning("Nenhuma previsão gerada.")
-    st.stop()
+    df = df.dropna(subset=["milhar", "centena", "premio", "data"])
 
-st.success("✅ Previsão gerada com sucesso!")
-st.dataframe(resultado_final, use_container_width=True)
+    milhar_bloqueada = set(df["milhar"])
+    centena_hist = set(df["centena"])
 
-# =========================
-# DOWNLOAD
-# =========================
-csv_saida = resultado_final.to_csv(index=False).encode("utf-8")
+    st.success("CSV carregado com sucesso ✔️")
 
-st.download_button(
-    "⬇️ Baixar previsões em CSV",
-    csv_saida,
-    "previsao_amf_omega.csv",
-    "text/csv"
-)
+    if st.button("🚀 GERAR PREVISÃO"):
+        resultados = []
 
-st.markdown("---")
-st.caption("AMF-OMEGA PRIME — análise estatística + Monte Carlo + recência")
+        for p in ["1º", "2º", "3º", "4º", "5º"]:
+            r = gerar_previsao(df, p, milhar_bloqueada, centena_hist)
+            resultados.append(r)
+
+        final = pd.concat(resultados, ignore_index=True)
+
+        st.subheader("📊 MILHARES CANDIDATAS (NÃO REPETIDAS)")
+        st.dataframe(final[["premio", "milhar", "centena", "score"]])
+
+else:
+    st.info("Aguardando upload do CSV…")
