@@ -1,134 +1,165 @@
-# =========================================================
-# 🧠 AMF-OMEGA PRIME — APP AUTOMÁTICO (VERSÃO FINAL)
-# =========================================================
+        # ==========================================================
+# 🧠 AMF-OMEGA PRIME v3 — APP AUTOMÁTICO STREAMLIT
+# ==========================================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
+from datetime import datetime
 
-# ========================
-# CONFIGURAÇÕES
-# ========================
+# =========================
+# CONFIGURAÇÕES GERAIS
+# =========================
 TOP_N = 5
 N_MC = 8000
 DECAY_HALFLIFE = 45
-SEED = 42
+SEMENTE = 42
 
-W_FREQ_M = 0.30
-W_FREQ_C = 0.20
-W_REC = 0.20
-W_MC = 0.20
-W_PENAL = 0.10
+np.random.seed(SEMENTE)
 
-np.random.seed(SEED)
-
-# ========================
-# FUNÇÕES
-# ========================
-def decay(days, hl):
-    return np.exp(-np.log(2) * days / hl)
-
-def gerar_previsao(df, premio, milhar_bloqueada, centena_hist):
-    base = df[df["premio"] == premio].copy()
-    if base.empty:
-        return pd.DataFrame()
-
-    freq_m = base["milhar"].value_counts(normalize=True)
-    freq_c = base["centena"].value_counts(normalize=True)
-
-    last_date = base["data"].max()
-    rec = (
-        base.groupby("milhar")["data"]
-        .max()
-        .apply(lambda d: decay((last_date - d).days, DECAY_HALFLIFE))
-    )
-
-    cents = freq_c.index.values
-    probs = freq_c.values / freq_c.values.sum()
-    mc_draws = np.random.choice(cents, size=N_MC, p=probs)
-    mc_score = pd.Series(mc_draws).value_counts(normalize=True)
-
-    candidatos = []
-
-    for cent in freq_c.index:
-        for d in range(10):
-            mil = f"{d}{cent}"
-
-            if mil in milhar_bloqueada:
-                continue  # NÃO repetir milhar do CSV
-
-            penal = 1.0 if cent in centena_hist else 0.0
-
-            candidatos.append({
-                "milhar": mil,
-                "centena": cent,
-                "f_m": freq_m.get(mil, 0.0),
-                "f_c": freq_c.get(cent, 0.0),
-                "rec": rec.get(mil, 0.0),
-                "mc": mc_score.get(cent, 0.0),
-                "penal": penal
-            })
-
-    cand = pd.DataFrame(candidatos)
-    if cand.empty:
-        return pd.DataFrame()
-
-    for c in ["f_m", "f_c", "rec", "mc"]:
-        mx = cand[c].max()
-        if mx > 0:
-            cand[c] /= mx
-
-    cand["score"] = (
-        W_FREQ_M * cand["f_m"] +
-        W_FREQ_C * cand["f_c"] +
-        W_REC * cand["rec"] +
-        W_MC * cand["mc"] -
-        W_PENAL * cand["penal"]
-    )
-
-    return (
-        cand.sort_values("score", ascending=False)
-            .head(TOP_N)
-            .assign(premio=premio)
-            .reset_index(drop=True)
-    )
-
-# ========================
-# APP
-# ========================
-st.set_page_config(page_title="AMF-OMEGA PRIME", layout="centered")
+# =========================
+# INTERFACE
+# =========================
+st.set_page_config(page_title="AMF-OMEGA PRIME", layout="wide")
 st.title("🧠 AMF-OMEGA PRIME")
 st.subheader("Sistema automático de análise e geração de milhares")
 
-arquivo = st.file_uploader("📂 Envie o CSV do Jogo do Bicho", type=["csv"])
+modo = st.selectbox(
+    "⚙️ Modo de operação",
+    ["Equilibrado", "Conservador", "Agressivo"]
+)
 
-if arquivo:
-    df = pd.read_csv(arquivo)
-    df.columns = df.columns.str.lower().str.strip()
+uploaded = st.file_uploader("📂 Envie o CSV do Jogo do Bicho", type=["csv"])
 
-    df["milhar"] = df["milhar"].astype(str).str.zfill(4)
-    df["centena"] = df["milhar"].str[-3:]
-    df["premio"] = df["premio"].astype(str)
-    df["data"] = pd.to_datetime(df["data"], errors="coerce")
+# =========================
+# FUNÇÕES
+# =========================
 
-    df = df.dropna(subset=["milhar", "centena", "premio", "data"])
+def normalizar(s):
+    if s.max() == s.min():
+        return s * 0
+    return (s - s.min()) / (s.max() - s.min())
 
-    milhar_bloqueada = set(df["milhar"])
-    centena_hist = set(df["centena"])
+def gerar_milhares_validas(df):
+    todas = [f"{i:04d}" for i in range(10000)]
+    usadas = set(df["milhar"].astype(str))
+    return sorted(list(set(todas) - usadas))
 
-    st.success("CSV carregado com sucesso ✔️")
+def backtest(df, candidatos):
+    ultimos = df.tail(1)
+    resultado = {
+        "1º": 0,
+        "2º": 0,
+        "3º": 0,
+        "4º": 0,
+        "5º": 0
+    }
+    for premio in resultado:
+        if ultimos[premio].values[0] in candidatos:
+            resultado[premio] = 1
+    return resultado
 
-    if st.button("🚀 GERAR PREVISÃO"):
-        resultados = []
+# =========================
+# EXECUÇÃO
+# =========================
+if uploaded:
 
-        for p in ["1º", "2º", "3º", "4º", "5º"]:
-            r = gerar_previsao(df, p, milhar_bloqueada, centena_hist)
-            resultados.append(r)
+    df = pd.read_csv(uploaded)
 
-        final = pd.concat(resultados, ignore_index=True)
+    # Esperado: colunas 1º a 5º
+    premios = ["1º", "2º", "3º", "4º", "5º"]
 
-        st.subheader("📊 MILHARES CANDIDATAS (NÃO REPETIDAS)")
-        st.dataframe(final[["premio", "milhar", "centena", "score"]])
+    # Normaliza formato
+    df = df[premios].astype(str)
+    df = df.applymap(lambda x: x.zfill(4))
+
+    df_long = df.melt(var_name="premio", value_name="milhar")
+    df_long["centena"] = df_long["milhar"].str[-3:]
+
+    # Frequências
+    f_m = df_long["milhar"].value_counts()
+    f_c = df_long["centena"].value_counts()
+
+    # Recência
+    rec = {}
+    for m in f_m.index:
+        idx = df_long[df_long["milhar"] == m].index.max()
+        rec[m] = len(df_long) - idx
+
+    rec = pd.Series(rec)
+
+    # Monte Carlo
+    mc = pd.Series(
+        np.random.rand(len(f_m)),
+        index=f_m.index
+    )
+
+    # Milhares válidas
+    validas = gerar_milhares_validas(df_long)
+
+    rows = []
+
+    for m in validas:
+        c = m[-3:]
+        rows.append({
+            "milhar": m,
+            "centena": c,
+            "f_m": f_m.get(m, 0),
+            "f_c": f_c.get(c, 0),
+            "rec": rec.get(m, rec.max()),
+            "mc": mc.sample(1).values[0]
+        })
+
+    res = pd.DataFrame(rows)
+
+    # Normalizações
+    res["f_m"] = normalizar(res["f_m"])
+    res["f_c"] = normalizar(res["f_c"])
+    res["rec"] = normalizar(res["rec"])
+
+    # Pesos por modo
+    if modo == "Conservador":
+        W = dict(f_m=0.25, f_c=0.20, rec=0.35, mc=0.20)
+    elif modo == "Agressivo":
+        W = dict(f_m=0.35, f_c=0.25, rec=0.10, mc=0.30)
+    else:
+        W = dict(f_m=0.30, f_c=0.20, rec=0.20, mc=0.30)
+
+    res["score"] = (
+        res["f_m"] * W["f_m"] +
+        res["f_c"] * W["f_c"] +
+        res["rec"] * W["rec"] +
+        res["mc"] * W["mc"]
+    )
+
+    res = res.sort_values("score", ascending=False)
+
+    final = []
+
+    for i, premio in enumerate(premios):
+        bloco = res.iloc[i*TOP_N:(i+1)*TOP_N].copy()
+        bloco["premio"] = premio
+        final.append(bloco)
+
+    resultado_final = pd.concat(final)
+
+    # =========================
+    # BACKTEST
+    # =========================
+    candidatos = resultado_final["milhar"].tolist()
+    bt = backtest(df, candidatos)
+
+    st.subheader("📊 BACKTEST (último concurso)")
+    st.json(bt)
+
+    # =========================
+    # RESULTADO FINAL
+    # =========================
+    st.subheader("🧠 PREVISÃO FINAL — MILHARES CANDIDATAS")
+    st.dataframe(
+        resultado_final[["premio", "milhar", "centena", "score"]],
+        use_container_width=True
+    )
 
 else:
-    st.info("Aguardando upload do CSV…")
+    st.info("⬆️ Aguardando upload do CSV...")
