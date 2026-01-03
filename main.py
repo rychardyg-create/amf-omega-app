@@ -1,26 +1,18 @@
 # =========================================================
-# 🧠 AMF-OMEGA PRIME — SISTEMA ADAPTATIVO COMPLETO (VERSÃO AVANÇADA)
+# 🧠 AMF-OMEGA PRIME — VERSÃO CORRIGIDA E FUNCIONAL (Streamlit Cloud)
 # =========================================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import math
 import json
 import os
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-from scipy.stats import chisquare
-from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import LSTM, Dense, Input
-import xgboost as xgb
+from datetime import datetime
 
 # ---------------- CONFIG ----------------
 TOP_N = 5
 N_MC = 10000
-HALF_LIFE = 45
-SEQ_LEN = 10  # Para LSTM
+HALF_LIFE = 45  # dias para decaimento de recência
 SEED = 42
 PESO_FILE = "pesos.json"
 
@@ -28,20 +20,21 @@ np.random.seed(SEED)
 
 # ------------- PESOS DINÂMICOS ----------
 DEFAULT_PESOS = {
-    "freq_m": 0.20,
-    "freq_c": 0.15,
+    "freq_m": 0.25,
+    "freq_c": 0.20,
     "rec": 0.15,
     "mc": 0.15,
-    "entropia": 0.10,
-    "lstm": 0.10,
-    "ae_anomaly": 0.05,
-    "xgb": 0.05,
-    "patterns": 0.05
+    "atraso": 0.10,
+    "entropia": 0.05,
+    "patterns": 0.10
 }
 
 def carregar_pesos():
     if os.path.exists(PESO_FILE):
-        return json.load(open(PESO_FILE))
+        try:
+            return json.load(open(PESO_FILE))
+        except:
+            pass
     return DEFAULT_PESOS.copy()
 
 def salvar_pesos(p):
@@ -51,153 +44,86 @@ pesos = carregar_pesos()
 
 # ---------------- FUNÇÕES ---------------
 def decay(days):
-    return np.exp(-np.log(2) * days / HALF_LIFE)
+    return np.exp(-np.log(2) * days / HALF_LIFE) if days >= 0 else 0
 
 def entropia(vals):
     p = np.array(vals)
     p = p[p > 0]
-    return -np.sum(p * np.log2(p)) if len(p) > 0 else 0
-
-def train_lstm(base, seq_len=SEQ_LEN):
-    if len(base) < seq_len + 1:
-        return lambda x: 0  # Fallback se dados insuficientes
-    
-    data = base['milhar'].astype(int).values.reshape(-1, 1)
-    scaler = MinMaxScaler()
-    data_scaled = scaler.fit_transform(data)
-    
-    X, y = [], []
-    for i in range(len(data_scaled) - seq_len):
-        X.append(data_scaled[i:i+seq_len])
-        y.append(data_scaled[i+seq_len])
-    
-    X, y = np.array(X), np.array(y)
-    model = Sequential([LSTM(50, input_shape=(seq_len, 1)), Dense(1)])
-    model.compile(optimizer='adam', loss='mse')
-    model.fit(X, y, epochs=20, verbose=0, batch_size=32)  # Reduzido para eficiência
-    
-    def predict(mil):
-        last_seq = data_scaled[-seq_len:].reshape(1, seq_len, 1)
-        pred = scaler.inverse_transform(model.predict(last_seq, verbose=0))[0][0]
-        return abs(int(mil) - pred) / 9999  # Normalizado, menor distância = melhor score
-    
-    return predict
-
-def train_autoencoder(base):
-    if len(base) < 10:
-        return lambda x: 0, 0  # Fallback
-    
-    data = np.array([list(map(int, m)) for m in base['milhar']])
-    scaler = MinMaxScaler()
-    data_scaled = scaler.fit_transform(data)
-    
-    input_layer = Input(shape=(4,))
-    encoded = Dense(2, activation='relu')(input_layer)
-    decoded = Dense(4, activation='sigmoid')(encoded)
-    autoencoder = Model(input_layer, decoded)
-    autoencoder.compile(optimizer='adam', loss='mse')
-    autoencoder.fit(data_scaled, data_scaled, epochs=20, verbose=0, batch_size=32)
-    
-    recon = autoencoder.predict(data_scaled, verbose=0)
-    errors = np.mean((data_scaled - recon)**2, axis=1)
-    threshold = np.mean(errors) + 2 * np.std(errors)
-    
-    def anomaly_score(mil):
-        mil_vec = np.array([list(map(int, mil))]).reshape(1, -1)
-        mil_scaled = scaler.transform(mil_vec)
-        recon = autoencoder.predict(mil_scaled, verbose=0)
-        error = np.mean((mil_scaled - recon)**2)
-        return max(0, (error - threshold) / max(errors)) if max(errors) > 0 else 0
-    
-    return anomaly_score
-
-def train_xgboost(base):
-    if len(base) < 10:
-        return lambda x: 0  # Fallback
-    
-    base['sum_digits'] = base['milhar'].apply(lambda m: sum(int(d) for d in m))
-    base['parity'] = base['milhar'].apply(lambda m: sum(int(d) % 2 for d in m))
-    base['centena'] = base['milhar'].str[-3:].astype(int)
-    
-    features = ['sum_digits', 'parity', 'centena']
-    X = base[features].iloc[:-1]
-    y = base['milhar'].astype(int).iloc[1:]
-    
-    model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=50)
-    model.fit(X, y)
-    
-    def predict(features_dict):
-        df = pd.DataFrame([features_dict])
-        return model.predict(df)[0] / 9999  # Normalizado
-    
-    return predict, features
+    if len(p) == 0:
+        return 0
+    p = p / p.sum()
+    return -np.sum(p * np.log2(p))
 
 def calculate_patterns(mil):
-    digits = list(map(int, mil))
+    digits = [int(d) for d in mil]
     sum_digits = sum(digits)
-    parity = sum(d % 2 for d in digits)
+    parity_count = sum(d % 2 for d in digits)
     repeats = len(digits) - len(set(digits))
-    return sum_digits / 36, parity / 4, repeats / 3  # Normalizados
-
-def chi_uniformity_test(freq):
-    observed = freq.values
-    expected = np.full_like(observed, len(observed) / sum(observed))
-    chi, p = chisquare(observed, expected)
-    return p  # Baixo p-value = não-uniforme (boost para candidatos de distribuições desviadas)
+    # Normalizados
+    return (
+        sum_digits / 36,        # máx 9+9+9+9=36
+        parity_count / 4,       # máx 4 pares/ímpares
+        repeats / 3             # máx 3 repetições (ex: 1111)
+    )
 
 # ---------------- UI --------------------
-st.set_page_config(page_title="AMF-OMEGA PRIME AVANÇADO", layout="wide")
-st.title("🧠 AMF-OMEGA PRIME AVANÇADO")
-st.caption("Sistema adaptativo avançado com ML para análise e geração de milhares")
+st.set_page_config(page_title="AMF-OMEGA PRIME", layout="wide")
+st.title("🧠 AMF-OMEGA PRIME")
+st.caption("Sistema adaptativo avançado para jogo do bicho — Compatível com Streamlit Cloud")
 
-csv = st.file_uploader("📤 Envie o CSV", type="csv")
+csv = st.file_uploader("📤 Envie o CSV com colunas: concurso, data, premio, milhar, grupo, animal", type="csv")
 
 if not csv:
+    st.info("👆 Faça upload do seu arquivo CSV para começar a análise.")
     st.stop()
 
+# ---------------- CARREGAMENTO E TRATAMENTO ----------------
 df = pd.read_csv(csv)
-df.columns = df["concurso","data","premio","milhar","grupo","animal"].str.lower()
+
+# Corrige possíveis nomes de colunas
+df.columns = [col.strip().lower() for col in df.columns]
+
+required_cols = ["concurso", "data", "premio", "milhar"]
+missing = [col for col in required_cols if col not in df.columns]
+if missing:
+    st.error(f"Colunas obrigatórias faltando: {missing}")
+    st.stop()
 
 df["milhar"] = df["milhar"].astype(str).str.zfill(4)
 df["centena"] = df["milhar"].str[-3:]
 df["data"] = pd.to_datetime(df["data"], errors="coerce")
-df = df.sort_values("data")  # Ordem temporal
+df = df.sort_values(["data", "premio"]).reset_index(drop=True)
 
-# ---------------- BLOQUEIOS -------------
+# Remove linhas com data inválida
+df = df.dropna(subset=["data"])
+
 milhares_usadas = set(df["milhar"])
 
-# ---------------- PROCESSAMENTO ---------
+# ---------------- PROCESSAMENTO POR PRÊMIO ----------------
 resultados = []
 
-for premio in df["premio"].unique():
+for premio in sorted(df["premio"].unique()):
 
     base = df[df["premio"] == premio].copy()
 
+    if len(base) < 10:
+        continue  # Poucos dados, pula
+
+    # Frequências
     freq_m = base["milhar"].value_counts(normalize=True)
     freq_c = base["centena"].value_counts(normalize=True)
 
+    # Recência e atraso
     ultima_data = base["data"].max()
-    rec = base.groupby("milhar")["data"].max().apply(
-        lambda d: decay((ultima_data - d).days) if pd.notnull(d) else 0
-    )
-    atraso = base.groupby("centena")["data"].max().apply(
-        lambda d: (ultima_data - d).days if pd.notnull(d) else 0
-    )
+    rec_mil = base.groupby("milhar")["data"].max().apply(lambda d: decay((ultima_data - d).days))
+    atraso_cent = base.groupby("centena")["data"].max().apply(lambda d: (ultima_data - d).days)
 
-    # MC ponderado por atraso inverso
-    probs = freq_c.values / freq_c.values.sum()
-    probs = probs * (1 / (1 + atraso[freq_c.index].values / atraso.max()))
-    probs /= probs.sum()
-    mc_draws = np.random.choice(freq_c.index, size=N_MC, p=probs)
+    # Monte Carlo ponderado por atraso (inverso)
+    atrasos_norm = (atraso_cent - atraso_cent.min()) / (atraso_cent.max() - atraso_cent.min() + 1)
+    probs_mc = freq_c.values * (1 + atrasos_norm.values)  # mais peso para atrasadas
+    probs_mc /= probs_mc.sum()
+    mc_draws = np.random.choice(freq_c.index, size=N_MC, p=probs_mc)
     mc_score = pd.Series(mc_draws).value_counts(normalize=True)
-
-    # Modelos avançados
-    lstm_predict = train_lstm(base)
-    ae_anomaly = train_autoencoder(base)
-    xgb_predict, xgb_features = train_xgboost(base)
-
-    # Teste estatístico
-    chi_p = chi_uniformity_test(freq_c)
 
     candidatos = []
 
@@ -210,85 +136,84 @@ for premio in df["premio"].unique():
             sum_norm, par_norm, rep_norm = calculate_patterns(mil)
             patterns_score = (sum_norm + par_norm + rep_norm) / 3
 
-            # Features para XGB
-            xgb_dict = {
-                'sum_digits': sum(int(dd) for dd in mil),
-                'parity': sum(int(dd) % 2 for dd in mil),
-                'centena': int(cent)
-            }
-            xgb_score = abs(xgb_predict(xgb_dict) - int(mil))
-
             candidatos.append({
                 "premio": premio,
                 "milhar": mil,
                 "centena": cent,
                 "freq_m": freq_m.get(mil, 0),
                 "freq_c": freq_c.get(cent, 0),
-                "rec": rec.get(mil, 0),
+                "rec": rec_mil.get(mil, 0),
                 "mc": mc_score.get(cent, 0),
-                "entropia": 0,  # Preencher depois
-                "lstm": lstm_predict(mil),
-                "ae_anomaly": ae_anomaly(mil),
-                "xgb": xgb_score / 9999,  # Normalizado
-                "patterns": patterns_score,
-                "chi_boost": max(0, 1 - chi_p)  # Boost se não-uniforme
+                "atraso": atraso_cent.get(cent, 0),
+                "patterns": patterns_score
             })
+
+    if not candidatos:
+        continue
 
     cand = pd.DataFrame(candidatos)
 
     # Entropia por centena
-    ent = cand.groupby("centena")["freq_c"].apply(entropia)
-    cand["entropia"] = cand["centena"].map(ent)
+    ent_group = cand.groupby("centena")["freq_c"].apply(entropia)
+    cand["entropia"] = cand["centena"].map(ent_group)
 
-    # Normalização
-    for c in ["freq_m", "freq_c", "rec", "mc", "entropia", "lstm", "ae_anomaly", "xgb", "patterns"]:
-        m = cand[c].max()
-        if m > 0:
-            cand[c] = cand[c] / m
+    # Normalização das colunas
+    cols_to_norm = ["freq_m", "freq_c", "rec", "mc", "atraso", "entropia", "patterns"]
+    for col in cols_to_norm:
+        max_val = cand[col].max()
+        if max_val > 0:
+            cand[col] = cand[col] / max_val
 
+    # Score final
     cand["score"] = (
         pesos["freq_m"] * cand["freq_m"] +
         pesos["freq_c"] * cand["freq_c"] +
         pesos["rec"] * cand["rec"] +
         pesos["mc"] * cand["mc"] +
+        pesos["atraso"] * cand["atraso"] +
         pesos["entropia"] * cand["entropia"] +
-        pesos["lstm"] * cand["lstm"] +
-        pesos["ae_anomaly"] * cand["ae_anomaly"] +
-        pesos["xgb"] * cand["xgb"] +
-        pesos["patterns"] * cand["patterns"] +
-        0.05 * cand["chi_boost"]  # Peso extra para chi
+        pesos["patterns"] * cand["patterns"]
     )
 
-    resultados.append(
-        cand.sort_values("score", ascending=False).head(TOP_N)
-    )
+    top = cand.sort_values("score", ascending=False).head(TOP_N)
+    resultados.append(top)
 
-final = pd.concat(resultados)
+if not resultados:
+    st.error("Não foi possível gerar previsões. Verifique se o CSV tem dados suficientes.")
+    st.stop()
+
+final = pd.concat(resultados).sort_values(["premio", "score"], ascending=[True, False])
 
 st.subheader("📊 PREVISÃO FINAL")
-st.dataframe(final)
+st.dataframe(final[["premio", "milhar", "centena", "score"]].round(4), use_container_width=True)
 
-# ---------------- AUTO-APRENDIZADO -------
+st.download_button(
+    label="📥 Baixar previsões como CSV",
+    data=final.to_csv(index=False).encode(),
+    file_name=f"previsao_amf_omega_{datetime.now().strftime('%Y%m%d')}.csv",
+    mime="text/csv"
+)
+
+# ---------------- AUTO-APRENDIZADO ----------------
 st.subheader("🧠 Auto-aprendizado")
 
 acertou = st.selectbox(
-    "O sistema acertou alguma milhar/centena?",
-    ["Nenhuma", "Algumas", "Muitas"]
+    "Quantas das previsões acertaram centena ou milhar?",
+    ["Nenhuma", "1 ou 2", "3 ou mais"]
 )
 
-if st.button("Atualizar aprendizado"):
-    ajuste = {
-        "Nenhuma": -0.05,
-        "Algumas": 0.03,
-        "Muitas": 0.07
-    }[acertou]
+if st.button("Atualizar pesos com feedback"):
+    ajuste = {"Nenhuma": -0.06, "1 ou 2": 0.04, "3 ou mais": 0.08}[acertou]
 
     for k in pesos:
-        pesos[k] = max(0.05, pesos[k] + ajuste * np.random.uniform(0.8, 1.2))  # Variação para sofisticação
+        pesos[k] = max(0.05, pesos[k] + ajuste)
 
-    s = sum(pesos.values())
+    total = sum(pesos.values())
     for k in pesos:
-        pesos[k] /= s
+        pesos[k] /= total
 
     salvar_pesos(pesos)
-    st.success("Pesos ajustados automaticamente com variação ✔️")
+    st.success("Pesos atualizados com sucesso! Sistema está aprendendo. ✔️")
+    st.write("Pesos atuais:", pesos)
+
+st.info("⚠️ Lembre-se: jogo é aleatório. Use com responsabilidade e apenas para diversão.")
