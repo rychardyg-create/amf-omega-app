@@ -1,165 +1,198 @@
-        # ==========================================================
-# 🧠 AMF-OMEGA PRIME v3 — APP AUTOMÁTICO STREAMLIT
+# ==========================================================
+# 🧠 AMF-OMEGA PRIME — SISTEMA TOTAL (FINAL)
 # ==========================================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
+import math
 
-# =========================
-# CONFIGURAÇÕES GERAIS
-# =========================
-TOP_N = 5
-N_MC = 8000
-DECAY_HALFLIFE = 45
+# ----------------------------------------------------------
+# CONFIG
+# ----------------------------------------------------------
 SEMENTE = 42
-
 np.random.seed(SEMENTE)
 
-# =========================
-# INTERFACE
-# =========================
-st.set_page_config(page_title="AMF-OMEGA PRIME", layout="wide")
-st.title("🧠 AMF-OMEGA PRIME")
-st.subheader("Sistema automático de análise e geração de milhares")
+TOP_N = 5
 
-modo = st.selectbox(
-    "⚙️ Modo de operação",
-    ["Equilibrado", "Conservador", "Agressivo"]
+PESOS = {
+    "conservador": {"freq": 0.50, "rec": 0.30, "mc": 0.15, "ent": 0.05},
+    "agressivo":   {"freq": 0.30, "rec": 0.20, "mc": 0.40, "ent": 0.10},
+}
+
+# ----------------------------------------------------------
+# UI
+# ----------------------------------------------------------
+st.set_page_config(page_title="AMF-OMEGA PRIME", layout="wide")
+
+st.title("🧠 AMF-OMEGA PRIME")
+st.caption("Sistema automático avançado de análise e geração de milhares")
+
+modo = st.radio(
+    "🧠 Modo de operação",
+    ["conservador", "agressivo"],
+    horizontal=True
 )
 
 uploaded = st.file_uploader("📂 Envie o CSV do Jogo do Bicho", type=["csv"])
 
-# =========================
+# ----------------------------------------------------------
 # FUNÇÕES
-# =========================
-
+# ----------------------------------------------------------
 def normalizar(s):
     if s.max() == s.min():
-        return s * 0
+        return pd.Series([0.0] * len(s))
     return (s - s.min()) / (s.max() - s.min())
 
-def gerar_milhares_validas(df):
-    todas = [f"{i:04d}" for i in range(10000)]
-    usadas = set(df["milhar"].astype(str))
-    return sorted(list(set(todas) - usadas))
 
-def backtest(df, candidatos):
-    ultimos = df.tail(1)
-    resultado = {
-        "1º": 0,
-        "2º": 0,
-        "3º": 0,
-        "4º": 0,
-        "5º": 0
-    }
-    for premio in resultado:
-        if ultimos[premio].values[0] in candidatos:
-            resultado[premio] = 1
-    return resultado
+def entropia(valores):
+    probs = valores / valores.sum()
+    return -np.sum(probs * np.log2(probs + 1e-9))
 
-# =========================
+
+def gerar_milhares(centena, bloqueadas):
+    base = centena.zfill(3)
+    return [f"{d}{base}" for d in "0123456789" if f"{d}{base}" not in bloqueadas]
+
+
+# ----------------------------------------------------------
 # EXECUÇÃO
-# =========================
+# ----------------------------------------------------------
 if uploaded:
-
     df = pd.read_csv(uploaded)
 
-    # Esperado: colunas 1º a 5º
-    premios = ["1º", "2º", "3º", "4º", "5º"]
+    # Padronização
+    df["milhar"] = df["milhar"].astype(str).str.zfill(4)
+    df["centena"] = df["milhar"].str[-3:]
+    df["dezena"] = df["milhar"].str[-2:]
+    df["grupo"] = df["dezena"].astype(int) // 4
+    df["premio"] = df["premio"].astype(str)
 
-    # Normaliza formato
-    df = df[premios].astype(str)
-    df = df.applymap(lambda x: x.zfill(4))
+    bloqueadas = set(df["milhar"])
 
-    df_long = df.melt(var_name="premio", value_name="milhar")
-    df_long["centena"] = df_long["milhar"].str[-3:]
+    df["idx"] = range(len(df))
 
-    # Frequências
-    f_m = df_long["milhar"].value_counts()
-    f_c = df_long["centena"].value_counts()
+    # -----------------------------
+    # MÉTRICAS BASE
+    # -----------------------------
+    freq_c = df["centena"].value_counts()
+    rec_c = df.groupby("centena")["idx"].max()
+    std_c = df.groupby("centena")["idx"].std().fillna(0)
 
-    # Recência
-    rec = {}
-    for m in f_m.index:
-        idx = df_long[df_long["milhar"] == m].index.max()
-        rec[m] = len(df_long) - idx
-
-    rec = pd.Series(rec)
-
-    # Monte Carlo
-    mc = pd.Series(
-        np.random.rand(len(f_m)),
-        index=f_m.index
+    # Entropia por centena
+    entropia_c = (
+        df.groupby("centena")["dezena"]
+        .value_counts()
+        .groupby(level=0)
+        .apply(lambda x: entropia(x.values))
     )
 
-    # Milhares válidas
-    validas = gerar_milhares_validas(df_long)
+    # Ranking por animal
+    ranking_grupo = (
+        df["grupo"]
+        .value_counts(normalize=True)
+        .rename("ranking_grupo")
+    )
 
+    # -----------------------------
+    # AUTO-BACKTEST (TOP-20)
+    # -----------------------------
+    cobertura = {}
+    for premio in df["premio"].unique():
+        ult = df[df["premio"] == premio].tail(1)
+        cobertura[premio] = ult["milhar"].iloc[0] in bloqueadas
+
+    # -----------------------------
+    # GERAÇÃO DE CANDIDATAS
+    # -----------------------------
     rows = []
 
-    for m in validas:
-        c = m[-3:]
-        rows.append({
-            "milhar": m,
-            "centena": c,
-            "f_m": f_m.get(m, 0),
-            "f_c": f_c.get(c, 0),
-            "rec": rec.get(m, rec.max()),
-            "mc": mc.sample(1).values[0]
-        })
+    for premio in sorted(df["premio"].unique()):
+        base_p = df[df["premio"] == premio]
+
+        top_centenas = (
+            freq_c.loc[freq_c.index.isin(base_p["centena"])]
+            .sort_values(ascending=False)
+            .head(10)
+            .index
+        )
+
+        for c in top_centenas:
+            for m in gerar_milhares(c, bloqueadas):
+                grupo = int(m[-2:]) // 4
+
+                rows.append({
+                    "premio": premio,
+                    "milhar": m,
+                    "centena": c,
+                    "grupo": grupo,
+                    "f_c": freq_c.get(c, 0),
+                    "rec_c": rec_c.get(c, len(df)),
+                    "std_c": std_c.get(c, 0),
+                    "ent": entropia_c.get(c, 0),
+                    "mc": np.random.beta(2, 5),
+                    "rank_grupo": ranking_grupo.get(grupo, 0)
+                })
 
     res = pd.DataFrame(rows)
 
-    # Normalizações
-    res["f_m"] = normalizar(res["f_m"])
-    res["f_c"] = normalizar(res["f_c"])
-    res["rec"] = normalizar(res["rec"])
+    # -----------------------------
+    # NORMALIZAÇÃO
+    # -----------------------------
+    for col in ["f_c", "rec_c", "std_c", "ent", "mc", "rank_grupo"]:
+        res[col] = normalizar(res[col])
 
-    # Pesos por modo
-    if modo == "Conservador":
-        W = dict(f_m=0.25, f_c=0.20, rec=0.35, mc=0.20)
-    elif modo == "Agressivo":
-        W = dict(f_m=0.35, f_c=0.25, rec=0.10, mc=0.30)
-    else:
-        W = dict(f_m=0.30, f_c=0.20, rec=0.20, mc=0.30)
+    w = PESOS[modo]
 
+    # -----------------------------
+    # SCORE FINAL (CORRIGIDO)
+    # -----------------------------
     res["score"] = (
-        res["f_m"] * W["f_m"] +
-        res["f_c"] * W["f_c"] +
-        res["rec"] * W["rec"] +
-        res["mc"] * W["mc"]
+        res["f_c"] * w["freq"] +
+        (1 - res["rec_c"]) * w["rec"] +
+        res["mc"] * w["mc"] +
+        res["ent"] * w["ent"] +
+        res["rank_grupo"] * 0.10 -
+        res["std_c"] * 0.15
     )
 
-    res = res.sort_values("score", ascending=False)
+    resultado = (
+        res.sort_values("score", ascending=False)
+        .groupby("premio")
+        .head(TOP_N)
+        .reset_index(drop=True)
+    )
 
-    final = []
+    # -----------------------------
+    # OUTPUT
+    # -----------------------------
+    st.success("✅ Sistema executado com sucesso")
 
-    for i, premio in enumerate(premios):
-        bloco = res.iloc[i*TOP_N:(i+1)*TOP_N].copy()
-        bloco["premio"] = premio
-        final.append(bloco)
-
-    resultado_final = pd.concat(final)
-
-    # =========================
-    # BACKTEST
-    # =========================
-    candidatos = resultado_final["milhar"].tolist()
-    bt = backtest(df, candidatos)
-
-    st.subheader("📊 BACKTEST (último concurso)")
-    st.json(bt)
-
-    # =========================
-    # RESULTADO FINAL
-    # =========================
-    st.subheader("🧠 PREVISÃO FINAL — MILHARES CANDIDATAS")
+    st.subheader("📊 Resultado Final")
     st.dataframe(
-        resultado_final[["premio", "milhar", "centena", "score"]],
+        resultado[["premio", "milhar", "centena", "grupo", "score"]],
         use_container_width=True
     )
 
+    st.subheader("🐾 Ranking por Animal")
+    st.dataframe(ranking_grupo.reset_index())
+
+    st.download_button(
+        "📥 Baixar CSV Final",
+        resultado.to_csv(index=False),
+        "resultado_amf_omega_final.csv",
+        "text/csv"
+    )
+
+    # -----------------------------
+    # PWA INFO
+    # -----------------------------
+    st.info(
+        "📱 Para instalar como APP:\n"
+        "• Abra no Chrome\n"
+        "• Menu ⋮ → Adicionar à tela inicial\n"
+        "• Funciona como aplicativo"
+    )
+
 else:
-    st.info("⬆️ Aguardando upload do CSV...")
+    st.warning("⬆️ Envie o CSV para iniciar")
